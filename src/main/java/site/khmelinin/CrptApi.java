@@ -13,44 +13,61 @@ import org.apache.http.impl.client.HttpClients;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+
 
 public class CrptApi {
 
-    public CrptApi() {
-        // не забыть въебать ограничение запросов
-    }
+    private static Semaphore semaphore;
 
+    public CrptApi(TimeUnit timeUnit, int requestLimit) {
+        long requestInterval = timeUnit.toMillis(1) / requestLimit;
+        semaphore = new Semaphore(requestLimit);
 
-    public static void main(String[] args) {
-        CrptApi crptApi = new CrptApi();
-        CrptApi.Document document = new CrptApi.Document();
-        crptApi.createDocument(document);
-
-    }
-
-    public void createDocument(Document document) {
-        try {
-            ObjectMapper objectMapper = new ObjectMapper();
-            String jsonDocument = objectMapper.writeValueAsString(document);
-            System.out.println(jsonDocument);
-            String apiUrl = "http://localhost:8081/receive";
-            try (CloseableHttpClient httpClient = HttpClients.createDefault()) {
-                HttpPost httpPost = new HttpPost(apiUrl);
-                StringEntity requestEntity = new StringEntity(jsonDocument);
-                httpPost.setEntity(requestEntity);
-
-                try (CloseableHttpResponse response = httpClient.execute(httpPost)) {
-
-                    int statusCode = response.getStatusLine().getStatusCode();
-                    System.out.println("Status code: " + statusCode);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
+        Thread timerThread = new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(requestInterval);
+                    semaphore.release();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
-            } catch (IOException e) {
-                throw new RuntimeException(e);
             }
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException(e);
+        });
+        timerThread.setDaemon(true);
+        timerThread.start();
+    }
+
+    public void createDocument(Document document, String signature) {
+        try {
+            if (semaphore.tryAcquire(1, 1, TimeUnit.SECONDS)) {
+                try {
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    String jsonDocument = objectMapper.writeValueAsString(document);
+
+                    String apiUrl = "https://ismp.crpt.ru/api/v3/lk/documents/create";
+
+                    try (CloseableHttpClient httpClient = HttpClients.createDefault()) {
+                        HttpPost httpPost = new HttpPost(apiUrl);
+                        httpPost.setEntity(new StringEntity(jsonDocument));
+
+                        try (CloseableHttpResponse response = httpClient.execute(httpPost)) {
+                            System.out.println("Status code: " + response.getStatusLine().getStatusCode());
+                        } catch (IOException e) {
+                            System.err.println("Error executing HTTP request: " + e.getMessage());
+                        }
+                    } catch (IOException e) {
+                        System.err.println("Error creating or closing HttpClient: " + e.getMessage());
+                    }
+                } catch (JsonProcessingException e) {
+                    System.err.println("Error processing JSON: " + e.getMessage());
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("Interrupted while acquiring semaphore: " + e.getMessage());
         }
     }
 
@@ -76,7 +93,6 @@ public class CrptApi {
         private String productionDate;
         @JsonProperty("production_type")
         private String productionType;
-
         @JsonProperty("products")
         private List<Product> products = new Product().addList();
         @JsonProperty("reg_date")
@@ -92,12 +108,6 @@ public class CrptApi {
 
         @Data
         public static class Product {
-            public List<Product> addList() {
-                List<Product> products = new ArrayList<>();
-                products.add(this);
-                return products;
-            }
-
             @JsonProperty("certificate_document")
             private String certificateDocument;
             @JsonProperty("certificate_document_date")
@@ -116,6 +126,12 @@ public class CrptApi {
             private String uitCode;
             @JsonProperty("uitu_code")
             private String uituCode;
+
+            public List<Product> addList() {
+                List<Product> products = new ArrayList<>();
+                products.add(this);
+                return products;
+            }
         }
     }
 }
